@@ -44,6 +44,28 @@ SPDX-License-Identifier: BSD-2-Clause-Patent
     0xe0fad9b3, 0x7f5c, 0x42c5, { 0xb2, 0xee, 0xb7, 0xa8, 0x23, 0x13, 0xcd, 0xb2 } \
   }
 
+#pragma pack(1)
+typedef struct {
+  UINT64 BaseAddress;
+  UINT32 PageCount;
+  UINT8  Permissions;
+  UINT16 EndpointId;
+  UINT8  Reserved;
+} AddressMapDescriptor;
+
+typedef struct {
+  UINT32 AmdSize;
+  UINT32 AmdCount;
+  UINT32 AmdOffset;
+  UINT32 Reserved;
+} ResourceInfoDescriptorHeader;
+
+typedef struct {
+  ResourceInfoDescriptorHeader Header;
+  AddressMapDescriptor AmdArray;
+} ResourceInfoDesc;
+#pragma pack()
+
 UINT16  FfaPartId;
 
 EFI_HARDWARE_INTERRUPT_PROTOCOL  *gInterrupt;
@@ -116,6 +138,13 @@ FfaPartitionTestAppEntry (
   DIRECT_MSG_ARGS_EX      DirectMsgArgsEx;
   UINT16                  CurrentMajorVersion;
   UINT16                  CurrentMinorVersion;
+  UINT32                  TargetId;
+  UINT64                  Flags;
+  UINT32                  ByteOffsetTag;
+  UINT16                  OurId;
+  ResourceInfoDesc        *Descriptor;
+  AddressMapDescriptor    *Amd;
+  UINT32                  AmdDescIndex;
 
   // Query FF-A version to make sure FF-A is supported
   Status = ArmFfaLibGetVersion (
@@ -229,28 +258,6 @@ FfaPartitionTestAppEntry (
     goto Done;
   }
 
-  // Setup the Thermal Service Notification Bits
-  ZeroMem (&DirectMsgArgsEx, sizeof (DirectMsgArgsEx));
-  DirectMsgArgsEx.Arg0 = 0x01; // Setup
-  DirectMsgArgsEx.Arg1 = 0xba7aff2eb1eac765;
-  DirectMsgArgsEx.Arg2 = 0xb610b3a359f64054;
-  DirectMsgArgsEx.Arg3 = 0x03;
-  DirectMsgArgsEx.Arg4 = (((UINT64)6 << 32) | (0));
-  DirectMsgArgsEx.Arg5 = (((UINT64)7 << 32) | (1));
-  DirectMsgArgsEx.Arg6 = (((UINT64)8 << 32) | (2));
-  Status               = FfaMessageSendDirectReq2 (FfaTestPartInfo.PartitionId, &FfaNotificationServiceGuid, &DirectMsgArgsEx);
-  if (EFI_ERROR (Status)) {
-    DEBUG ((DEBUG_ERROR, "Unable to communicate direct req 2 with FF-A Ffa test SP (%r).\n", Status));
-    goto Done;
-  }
-
-  if (DirectMsgArgsEx.Arg0 != 0) {
-    DEBUG ((DEBUG_ERROR, "Command Failed: %x\n", DirectMsgArgsEx.Arg0));
-    goto Done;
-  } else {
-    DEBUG ((DEBUG_INFO, "Thermal Service Setup Success\n"));
-  }
-
   // Setup the Battery Service Notification Bits
   ZeroMem (&DirectMsgArgsEx, sizeof (DirectMsgArgsEx));
   DirectMsgArgsEx.Arg0 = 0x01; // Setup
@@ -269,12 +276,35 @@ FfaPartitionTestAppEntry (
   }
 
   if (DirectMsgArgsEx.Arg0 != 0) {
-    DEBUG ((DEBUG_ERROR, "Command Failed: %x\n", DirectMsgArgsEx.Arg0));
+    DEBUG ((DEBUG_ERROR, "Command Failed: %d\n", DirectMsgArgsEx.Arg0));
     goto Done;
   } else {
     DEBUG ((DEBUG_INFO, "Battery Service Setup Success\n"));
   }
 
+
+  // Setup the Thermal Service Notification Bits
+  ZeroMem (&DirectMsgArgsEx, sizeof (DirectMsgArgsEx));
+  DirectMsgArgsEx.Arg0 = 0x01; // Setup
+  DirectMsgArgsEx.Arg1 = 0xba7aff2eb1eac765;
+  DirectMsgArgsEx.Arg2 = 0xb610b3a359f64054;
+  DirectMsgArgsEx.Arg3 = 0x03;
+  DirectMsgArgsEx.Arg4 = (((UINT64)6 << 32) | (0));
+  DirectMsgArgsEx.Arg5 = (((UINT64)7 << 32) | (1));
+  DirectMsgArgsEx.Arg6 = (((UINT64)8 << 32) | (2));
+  Status               = FfaMessageSendDirectReq2 (FfaTestPartInfo.PartitionId, &FfaNotificationServiceGuid, &DirectMsgArgsEx);
+  if (EFI_ERROR (Status)) {
+    DEBUG ((DEBUG_ERROR, "Unable to communicate direct req 2 with FF-A Ffa test SP (%r).\n", Status));
+    goto Done;
+  }
+
+  if (DirectMsgArgsEx.Arg0 != 0) {
+    DEBUG ((DEBUG_ERROR, "Command Failed: %d\n", DirectMsgArgsEx.Arg0));
+    goto Done;
+  } else {
+    DEBUG ((DEBUG_INFO, "Thermal Service Setup Success\n"));
+  }
+  
   // Destroy the Thermal Service Notification Bit 1
   ZeroMem (&DirectMsgArgsEx, sizeof (DirectMsgArgsEx));
   DirectMsgArgsEx.Arg0 = 0x02; // Destroy
@@ -289,7 +319,7 @@ FfaPartitionTestAppEntry (
   }
 
   if (DirectMsgArgsEx.Arg0 != 0) {
-    DEBUG ((DEBUG_ERROR, "Command Failed: %x\n", DirectMsgArgsEx.Arg0));
+    DEBUG ((DEBUG_ERROR, "Command Failed: %d\n", DirectMsgArgsEx.Arg0));
     goto Done;
   } else {
     DEBUG ((DEBUG_INFO, "Thermal Service Destroy Success\n"));
@@ -327,10 +357,58 @@ FfaPartitionTestAppEntry (
   }
 
   if (DirectMsgArgsEx.Arg0 != 0) {
-    DEBUG ((DEBUG_ERROR, "Command Failed: %x\n", DirectMsgArgsEx.Arg0));
+    DEBUG ((DEBUG_ERROR, "Command Failed: %d\n", DirectMsgArgsEx.Arg0));
     goto Done;
   } else {
     DEBUG ((DEBUG_INFO, "Test Test Service Notification Test Success\n"));
+  }
+
+  // Acquire our ID to release the RX buffer
+  Status = ArmFfaLibPartitionIdGet(&OurId);
+  if (EFI_ERROR (Status)) {
+    DEBUG ((DEBUG_ERROR, "Command Failed w/ Error Code: %r\n", Status));
+    goto Done;
+  }
+
+  // Release the RX buffer before attempting to use it with this command
+  Status = ArmFfaLibRxRelease(OurId);
+  if (EFI_ERROR (Status)) {
+    DEBUG ((DEBUG_ERROR, "Command Failed w/ Error Code: %r\n", Status));
+    goto Done;
+  }
+
+  // Test the NS_RES_INFO_GET command, all endpoints
+  TargetId = 0;
+  Flags = 0;
+  ByteOffsetTag = 0;
+  Status = FfaNsResInfoGet (TargetId, Flags, ByteOffsetTag);
+  if (EFI_ERROR (Status)) {
+    DEBUG ((DEBUG_ERROR, "Command Failed w/ Error Code: %r\n", Status));
+    goto Done;
+  } else {
+    DEBUG ((DEBUG_INFO, "NS_RES_INFO_GET All Endpoints Success\n"));
+  }
+
+  // Print out the descriptor information from the RX buffer
+  Descriptor = (VOID *)PcdGet64 (PcdFfaRxBuffer);
+  DEBUG ((DEBUG_INFO, "Resource Information Descriptor: AmdSize: %x, AmdCount: %x, AmdOffset: %x\n", \
+    Descriptor->Header.AmdSize, Descriptor->Header.AmdCount, Descriptor->Header.AmdOffset));
+  Amd = &Descriptor->AmdArray;
+  for (AmdDescIndex = 0; AmdDescIndex < Descriptor->Header.AmdCount; AmdDescIndex++) {
+    DEBUG ((DEBUG_INFO, "Address Map Descriptor[%x]: Address: %lx, PageCount: %x, Permissions: %x, ID: %x\n", \
+      AmdDescIndex, Amd[AmdDescIndex].BaseAddress, Amd[AmdDescIndex].PageCount, Amd[AmdDescIndex].Permissions, Amd[AmdDescIndex].EndpointId));
+  }
+
+  // Test the NS_RES_INFO_GET command, Secure Partition endpoints
+  TargetId = 0x8002;
+  Flags = 1;
+  ByteOffsetTag = 0;
+  Status = FfaNsResInfoGet (TargetId, Flags, ByteOffsetTag);
+  if (EFI_ERROR (Status)) {
+    DEBUG ((DEBUG_ERROR, "Command Failed w/ Error Code: %r\n", Status));
+    goto Done;
+  } else {
+    DEBUG ((DEBUG_INFO, "NS_RES_INFO_GET Targeted Endpoint Success\n"));
   }
 
   return EFI_SUCCESS;
